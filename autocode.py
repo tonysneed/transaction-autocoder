@@ -30,7 +30,8 @@ MODEL_DIR = "models"
 TFIDF_MODEL_PATH = os.path.join(MODEL_DIR, "model_tfidf.joblib")
 TFIDF_CLASSES_PATH = os.path.join(MODEL_DIR, "model_tfidf_classes.json")
 
-EMBED_MODEL_PATH = os.path.join(MODEL_DIR, "model_embeddings.xgb")
+# Save embeddings model as UBJSON for stable Booster load/save
+EMBED_MODEL_PATH = os.path.join(MODEL_DIR, "model_embeddings.ubj")
 EMBED_CLASSES_PATH = os.path.join(MODEL_DIR, "model_embeddings_classes.json")
 
 # Auto-code threshold
@@ -204,19 +205,16 @@ def train_or_load_tfidf(train_df: pd.DataFrame):
     return model, classes
 
 # =========================
-# Embeddings: Train or Load (already int-labeled)
+# Embeddings: Train or Load (Booster only for stability)
 # =========================
 def train_or_load_embeddings(train_df: pd.DataFrame):
-    # Load saved booster + classes
     if os.path.exists(EMBED_MODEL_PATH) and os.path.exists(EMBED_CLASSES_PATH) and not FORCE_RETRAIN:
         print("Loading saved Embeddings model...")
-        clf = build_xgb_classifier(num_classes=1)  # placeholder; booster carries the real config
         booster = xgb.Booster()
         booster.load_model(EMBED_MODEL_PATH)
-        clf._Booster = booster  # attach booster to sklearn wrapper
         with open(EMBED_CLASSES_PATH, "r", encoding="utf-8") as f:
             classes = np.array(json.load(f), dtype=object)
-        return clf, classes
+        return booster, classes
 
     print("Training Embeddings model (full dataset, no validation split)...")
 
@@ -235,14 +233,14 @@ def train_or_load_embeddings(train_df: pd.DataFrame):
     clf.fit(X, y_idx)
     print("Trained on full dataset (no validation split).")
 
-    # Save underlying Booster (avoids sklearn metadata issues)
-    clf.get_booster().save_model(EMBED_MODEL_PATH)
+    booster = clf.get_booster()
+    booster.save_model(EMBED_MODEL_PATH)
     with open(EMBED_CLASSES_PATH, "w", encoding="utf-8") as f:
         json.dump(classes.tolist(), f)
 
     print(f"Saved model → {EMBED_MODEL_PATH}")
     print(f"Saved classes → {EMBED_CLASSES_PATH}")
-    return clf, classes
+    return booster, classes
 
 # =========================
 # MAIN
@@ -259,13 +257,6 @@ def main():
         if col not in score_df.columns:
             raise ValueError(f"Scoring file missing required column: '{col}'")
 
-    # Prep numeric + text
-    train_df = add_numeric_features(train_df)
-    score_df = add_numeric_features(score_df)
-
-    train_df["Text"] = build_text_column(train_df)
-    score_df["Text"] = build_text_column(score_df)
-
     # Guard: ensure there is at least 1 row to score
     if len(score_df) == 0:
         raise ValueError(
@@ -273,7 +264,14 @@ def main():
             "Make sure it has data rows under the header row."
         )
 
-    # Guard: ensure Text isn't entirely empty (optional but useful)
+    # Prep numeric + text
+    train_df = add_numeric_features(train_df)
+    score_df = add_numeric_features(score_df)
+
+    train_df["Text"] = build_text_column(train_df)
+    score_df["Text"] = build_text_column(score_df)
+
+    # Guard: ensure scoring text isn't entirely empty
     if score_df["Text"].str.len().sum() == 0:
         raise ValueError(
             f"All 'Text' values are empty after normalization in '{SCORE_FILE}'. "
@@ -284,13 +282,16 @@ def main():
     train_df = train_df[train_df[COL_CODE].notna()].copy()
     train_df[COL_CODE] = train_df[COL_CODE].astype(str)
 
+    if len(train_df) == 0:
+        raise ValueError(f"No labeled rows found in '{TRAIN_FILE}'. Column '{COL_CODE}' must contain codes.")
+
     if FEATURE_MODE.lower() == "tfidf":
         model, classes = train_or_load_tfidf(train_df)
         X_new = score_df[["Text", "AmountNum", "AbsAmount", "IsDebit"]]
         probs = model.predict_proba(X_new)
 
     elif FEATURE_MODE.lower() == "embeddings":
-        clf, classes = train_or_load_embeddings(train_df)
+        booster, classes = train_or_load_embeddings(train_df)
 
         score_texts = score_df["Text"].tolist()
         score_emb = embed_texts_local(score_texts)
@@ -298,10 +299,16 @@ def main():
         score_num = score_df[["AmountNum", "AbsAmount", "IsDebit"]].to_numpy(dtype=np.float32)
         X_new = np.hstack([score_emb, score_num]).astype(np.float32)
 
-        probs = clf.predict_proba(X_new)
+        dmat = xgb.DMatrix(X_new)
+        probs = booster.predict(dmat)  # N x K probability matrix for multi:softprob
 
     else:
         raise ValueError("FEATURE_MODE must be 'tfidf' or 'embeddings'")
+
+    # If a single row is scored, XGBoost can sometimes return shape (K,) instead of (1, K)
+    probs = np.asarray(probs)
+    if probs.ndim == 1:
+        probs = probs.reshape(1, -1)
 
     best_idx = np.argmax(probs, axis=1)
     best_prob = probs[np.arange(len(best_idx)), best_idx]

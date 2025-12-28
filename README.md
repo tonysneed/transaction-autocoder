@@ -27,4 +27,5 @@ This program trains a model on bank transaction data. It then uses this model to
 
 ```bash
 rm -f models/model_embeddings.xgb models/model_embeddings_classes.json
+rm -f models/model_embeddings.ubj models/model_embeddings_classes.json
 ```
