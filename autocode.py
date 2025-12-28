@@ -11,7 +11,7 @@ import xgboost as xgb
 # CONFIG
 # =========================
 TRAIN_FILE = "training.xlsx"
-SCORE_FILE = "to_code.xlsx"
+SCORE_FILE_CHECKING = "to_code_checking.csv"
 OUTPUT_FILE = "to_code_scored.xlsx"
 
 # Train persistence (models)
@@ -68,6 +68,52 @@ def add_numeric_features(df: pd.DataFrame) -> pd.DataFrame:
     out["AbsAmount"] = out["AmountNum"].abs()
     # Assumes debits are negative, credits positive
     out["IsDebit"] = (out["AmountNum"] < 0).astype(int)
+    return out
+
+def parse_money(series: pd.Series) -> pd.Series:
+    """Convert currency-formatted strings like '$1,234.56' to float."""
+    return (
+        series.astype(str)
+        .str.replace(r"[,$]", "", regex=True)
+        .str.replace("(", "-", regex=False)
+        .str.replace(")", "", regex=False)
+        .replace("nan", "0")
+        .astype(float)
+    )
+
+def normalize_score_csv(score_df: pd.DataFrame) -> pd.DataFrame:
+    """Map bank-export CSV columns into the internal schema used by the model.
+
+    Expected CSV columns:
+      Date, Status, Type, CheckNumber, Description, Withdrawal, Deposit, RunningBalance
+
+    Mappings:
+      Date -> Date
+      Description -> Merchant
+      Withdrawal/Deposit -> Amount (Withdrawal treated as negative, Deposit positive)
+
+    Internal columns added if missing:
+      Merchant, Description, Amount
+    """
+    out = score_df.copy()
+
+    # Merchant comes from the bank 'Description' field
+    if "Description" in out.columns:
+        out[COL_MERCHANT] = out["Description"].astype(str)
+    else:
+        out[COL_MERCHANT] = ""
+
+    # Internal Description column (model uses it as part of text). If absent, leave blank.
+    if COL_DESCRIPTION not in out.columns:
+        out[COL_DESCRIPTION] = ""
+
+    # Compute Amount from Withdrawal/Deposit if Amount not already present
+    if COL_AMOUNT not in out.columns:
+        w = parse_money(out.get("Withdrawal", 0)).fillna(0.0)
+        d = parse_money(out.get("Deposit", 0)).fillna(0.0)
+        # Withdrawal is money out (negative), Deposit money in (positive)
+        out[COL_AMOUNT] = d - w
+
     return out
 
 # =========================
@@ -187,22 +233,30 @@ def train_or_load_embeddings(train_df: pd.DataFrame):
 # =========================
 def main():
     train_df = pd.read_excel(TRAIN_FILE)
-    score_df = pd.read_excel(SCORE_FILE)
+    score_df = pd.read_csv(SCORE_FILE_CHECKING)
 
     # Validate required columns
     for col in [COL_MERCHANT, COL_DESCRIPTION, COL_AMOUNT, COL_CODE]:
         if col not in train_df.columns:
             raise ValueError(f"Training file missing required column: '{col}'")
-    for col in [COL_MERCHANT, COL_DESCRIPTION, COL_AMOUNT]:
-        if col not in score_df.columns:
-            raise ValueError(f"Scoring file missing required column: '{col}'")
+    # Score CSV schema validation (bank export)
+    required_score_cols = ["Date", "Description", "Withdrawal", "Deposit"]
+    missing = [c for c in required_score_cols if c not in score_df.columns]
+    if missing:
+        raise ValueError(
+            f"Scoring file missing required column(s): {missing}. "
+            "Expected: Date, Description, Withdrawal, Deposit (plus optional other columns)."
+        )
 
     # Guard: ensure there is at least 1 row to score
     if len(score_df) == 0:
         raise ValueError(
-            f"'{SCORE_FILE}' contains 0 rows to score. "
+            f"'{SCORE_FILE_CHECKING}' contains 0 rows to score. "
             "Make sure it has data rows under the header row."
         )
+
+    # Map bank-export CSV columns into internal schema
+    score_df = normalize_score_csv(score_df)
 
     # Prep numeric + text
     train_df = add_numeric_features(train_df)
@@ -214,7 +268,7 @@ def main():
     # Guard: ensure scoring text isn't entirely empty
     if score_df["Text"].str.len().sum() == 0:
         raise ValueError(
-            f"All 'Text' values are empty after normalization in '{SCORE_FILE}'. "
+            f"All 'Text' values are empty after normalization in '{SCORE_FILE_CHECKING}'. "
             "Check that Merchant/Description cells contain text."
         )
 

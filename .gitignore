@@ -218,3 +218,4 @@ __marimo__/
 /models/
 /.emb_cache/
 ~*.*
+.DS_Store
