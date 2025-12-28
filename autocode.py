@@ -4,12 +4,6 @@ import json
 import hashlib
 import numpy as np
 import pandas as pd
-import joblib
-
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import LabelEncoder
 
 import xgboost as xgb
 
@@ -20,15 +14,9 @@ TRAIN_FILE = "training.xlsx"
 SCORE_FILE = "to_code.xlsx"
 OUTPUT_FILE = "to_code_scored.xlsx"
 
-# Choose: "tfidf" or "embeddings"
-FEATURE_MODE = "embeddings"
-
 # Train persistence (models)
 FORCE_RETRAIN = False
 MODEL_DIR = "models"
-
-TFIDF_MODEL_PATH = os.path.join(MODEL_DIR, "model_tfidf.joblib")
-TFIDF_CLASSES_PATH = os.path.join(MODEL_DIR, "model_tfidf_classes.json")
 
 # Save embeddings model as UBJSON for stable Booster load/save
 EMBED_MODEL_PATH = os.path.join(MODEL_DIR, "model_embeddings.ubj")
@@ -157,54 +145,6 @@ def build_xgb_classifier(num_classes: int):
     )
 
 # =========================
-# TF-IDF: Train or Load (Label-encoded)
-# =========================
-def train_or_load_tfidf(train_df: pd.DataFrame):
-    if os.path.exists(TFIDF_MODEL_PATH) and os.path.exists(TFIDF_CLASSES_PATH) and not FORCE_RETRAIN:
-        print("Loading saved TF-IDF model...")
-        model = joblib.load(TFIDF_MODEL_PATH)
-        with open(TFIDF_CLASSES_PATH, "r", encoding="utf-8") as f:
-            classes = np.array(json.load(f), dtype=object)
-        return model, classes
-
-    print("Training TF-IDF model (full dataset, no validation split)...")
-
-    X = train_df[["Text", "AmountNum", "AbsAmount", "IsDebit"]]
-    y_raw = train_df[COL_CODE].astype(str).to_numpy()
-
-    # Encode string labels to 0..K-1 (required for some XGBoost versions)
-    le = LabelEncoder()
-    y = le.fit_transform(y_raw)  # ints
-    classes = le.classes_.astype(object)
-
-    pre = ColumnTransformer(
-        transformers=[
-            ("text", TfidfVectorizer(
-                ngram_range=(1, 2),
-                min_df=2,
-                max_df=0.98,
-                sublinear_tf=True
-            ), "Text"),
-            ("num", "passthrough", ["AmountNum", "AbsAmount", "IsDebit"]),
-        ],
-        remainder="drop"
-    )
-
-    clf = build_xgb_classifier(num_classes=len(classes))
-    model = Pipeline(steps=[("pre", pre), ("clf", clf)])
-
-    model.fit(X, y)
-    print("Trained on full dataset (no validation split).")
-
-    joblib.dump(model, TFIDF_MODEL_PATH)
-    with open(TFIDF_CLASSES_PATH, "w", encoding="utf-8") as f:
-        json.dump(classes.tolist(), f)
-
-    print(f"Saved model → {TFIDF_MODEL_PATH}")
-    print(f"Saved classes → {TFIDF_CLASSES_PATH}")
-    return model, classes
-
-# =========================
 # Embeddings: Train or Load (Booster only for stability)
 # =========================
 def train_or_load_embeddings(train_df: pd.DataFrame):
@@ -285,25 +225,17 @@ def main():
     if len(train_df) == 0:
         raise ValueError(f"No labeled rows found in '{TRAIN_FILE}'. Column '{COL_CODE}' must contain codes.")
 
-    if FEATURE_MODE.lower() == "tfidf":
-        model, classes = train_or_load_tfidf(train_df)
-        X_new = score_df[["Text", "AmountNum", "AbsAmount", "IsDebit"]]
-        probs = model.predict_proba(X_new)
+    # Embeddings-only workflow
+    booster, classes = train_or_load_embeddings(train_df)
 
-    elif FEATURE_MODE.lower() == "embeddings":
-        booster, classes = train_or_load_embeddings(train_df)
+    score_texts = score_df["Text"].tolist()
+    score_emb = embed_texts_local(score_texts)
 
-        score_texts = score_df["Text"].tolist()
-        score_emb = embed_texts_local(score_texts)
+    score_num = score_df[["AmountNum", "AbsAmount", "IsDebit"]].to_numpy(dtype=np.float32)
+    X_new = np.hstack([score_emb, score_num]).astype(np.float32)
 
-        score_num = score_df[["AmountNum", "AbsAmount", "IsDebit"]].to_numpy(dtype=np.float32)
-        X_new = np.hstack([score_emb, score_num]).astype(np.float32)
-
-        dmat = xgb.DMatrix(X_new)
-        probs = booster.predict(dmat)  # N x K probability matrix for multi:softprob
-
-    else:
-        raise ValueError("FEATURE_MODE must be 'tfidf' or 'embeddings'")
+    dmat = xgb.DMatrix(X_new)
+    probs = booster.predict(dmat)  # N x K probability matrix for multi:softprob
 
     # If a single row is scored, XGBoost can sometimes return shape (K,) instead of (1, K)
     probs = np.asarray(probs)
@@ -325,7 +257,7 @@ def main():
 
     out.to_excel(OUTPUT_FILE, index=False)
     print(f"Wrote → {OUTPUT_FILE}")
-    print(f"Mode: {FEATURE_MODE} | Auto threshold: {AUTO_ASSIGN_THRESHOLD} | Force retrain: {FORCE_RETRAIN}")
+    print(f"Auto threshold: {AUTO_ASSIGN_THRESHOLD} | Force retrain: {FORCE_RETRAIN}")
 
 if __name__ == "__main__":
     main()
