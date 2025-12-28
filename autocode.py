@@ -12,7 +12,9 @@ import xgboost as xgb
 # =========================
 TRAIN_FILE = "training.xlsx"
 SCORE_FILE_CHECKING = "to_code_checking.csv"
-OUTPUT_FILE = "to_code_scored.xlsx"
+SCORE_FILE_CREDIT = "to_code_credit.csv"
+OUTPUT_FILE_CHECKING = "to_code_checking_scored.xlsx"
+OUTPUT_FILE_CREDIT = "to_code_credit_scored.xlsx"
 
 # Train persistence (models)
 FORCE_RETRAIN = False
@@ -81,7 +83,7 @@ def parse_money(series: pd.Series) -> pd.Series:
         .astype(float)
     )
 
-def normalize_score_csv(score_df: pd.DataFrame) -> pd.DataFrame:
+def normalize_score_checking_csv(score_df: pd.DataFrame) -> pd.DataFrame:
     """Map bank-export CSV columns into the internal schema used by the model.
 
     Expected CSV columns:
@@ -113,6 +115,48 @@ def normalize_score_csv(score_df: pd.DataFrame) -> pd.DataFrame:
         d = parse_money(out.get("Deposit", 0)).fillna(0.0)
         # Withdrawal is money out (negative), Deposit money in (positive)
         out[COL_AMOUNT] = d - w
+
+    return out
+
+def normalize_score_credit_csv(score_df: pd.DataFrame) -> pd.DataFrame:
+    """Map credit-card CSV columns into the internal schema used by the model.
+
+    Expected CSV columns:
+      Transaction Date, Description, Amount
+
+    Mappings:
+      Transaction Date -> Date
+      Description -> Merchant
+      Amount -> Amount (already signed; debits are negative)
+
+    Internal columns added if missing:
+      Merchant, Description, Amount, Date
+    """
+    out = score_df.copy()
+
+    # Date
+    if COL_DATE not in out.columns:
+        if "Transaction Date" in out.columns:
+            out[COL_DATE] = out["Transaction Date"]
+        else:
+            out[COL_DATE] = ""
+
+    # Merchant comes from the credit 'Description' field
+    if "Description" in out.columns:
+        out[COL_MERCHANT] = out["Description"].astype(str)
+    else:
+        out[COL_MERCHANT] = ""
+
+    # Internal Description column (model uses it as part of text). If absent, leave blank.
+    if COL_DESCRIPTION not in out.columns:
+        out[COL_DESCRIPTION] = ""
+
+    # Amount comes directly from the credit 'Amount' column (may be currency formatted)
+    if COL_AMOUNT not in out.columns:
+        if "Amount" in out.columns:
+            out[COL_AMOUNT] = parse_money(out["Amount"]).fillna(0.0)
+        else:
+            out[COL_AMOUNT] = 0.0
 
     return out
 
@@ -228,59 +272,13 @@ def train_or_load_embeddings(train_df: pd.DataFrame):
     print(f"Saved classes → {EMBED_CLASSES_PATH}")
     return booster, classes
 
-# =========================
-# MAIN
-# =========================
-def main():
-    train_df = pd.read_excel(TRAIN_FILE)
-    score_df = pd.read_csv(SCORE_FILE_CHECKING)
-
-    # Validate required columns
-    for col in [COL_MERCHANT, COL_DESCRIPTION, COL_AMOUNT, COL_CODE]:
-        if col not in train_df.columns:
-            raise ValueError(f"Training file missing required column: '{col}'")
-    # Score CSV schema validation (bank export)
-    required_score_cols = ["Date", "Description", "Withdrawal", "Deposit"]
-    missing = [c for c in required_score_cols if c not in score_df.columns]
-    if missing:
-        raise ValueError(
-            f"Scoring file missing required column(s): {missing}. "
-            "Expected: Date, Description, Withdrawal, Deposit (plus optional other columns)."
-        )
-
-    # Guard: ensure there is at least 1 row to score
-    if len(score_df) == 0:
-        raise ValueError(
-            f"'{SCORE_FILE_CHECKING}' contains 0 rows to score. "
-            "Make sure it has data rows under the header row."
-        )
-
-    # Map bank-export CSV columns into internal schema
-    score_df = normalize_score_csv(score_df)
-
-    # Prep numeric + text
-    train_df = add_numeric_features(train_df)
+def score_transactions(score_df: pd.DataFrame, booster: xgb.Booster, classes: np.ndarray) -> pd.DataFrame:
+    """Return a copy of score_df with SuggestedCode/Confidence/AutoCode/NeedsReview columns."""
     score_df = add_numeric_features(score_df)
-
-    train_df["Text"] = build_text_column(train_df)
     score_df["Text"] = build_text_column(score_df)
 
-    # Guard: ensure scoring text isn't entirely empty
     if score_df["Text"].str.len().sum() == 0:
-        raise ValueError(
-            f"All 'Text' values are empty after normalization in '{SCORE_FILE_CHECKING}'. "
-            "Check that Merchant/Description cells contain text."
-        )
-
-    # Only labeled rows in training
-    train_df = train_df[train_df[COL_CODE].notna()].copy()
-    train_df[COL_CODE] = train_df[COL_CODE].astype(str)
-
-    if len(train_df) == 0:
-        raise ValueError(f"No labeled rows found in '{TRAIN_FILE}'. Column '{COL_CODE}' must contain codes.")
-
-    # Embeddings-only workflow
-    booster, classes = train_or_load_embeddings(train_df)
+        raise ValueError("All 'Text' values are empty after normalization. Check Merchant/Description fields.")
 
     score_texts = score_df["Text"].tolist()
     score_emb = embed_texts_local(score_texts)
@@ -289,9 +287,8 @@ def main():
     X_new = np.hstack([score_emb, score_num]).astype(np.float32)
 
     dmat = xgb.DMatrix(X_new)
-    probs = booster.predict(dmat)  # N x K probability matrix for multi:softprob
+    probs = booster.predict(dmat)
 
-    # If a single row is scored, XGBoost can sometimes return shape (K,) instead of (1, K)
     probs = np.asarray(probs)
     if probs.ndim == 1:
         probs = probs.reshape(1, -1)
@@ -308,9 +305,75 @@ def main():
     out["Confidence"] = best_prob
     out["AutoCode"] = auto_code
     out["NeedsReview"] = needs_review
+    return out
 
-    out.to_excel(OUTPUT_FILE, index=False)
-    print(f"Wrote → {OUTPUT_FILE}")
+# =========================
+# MAIN
+# =========================
+def main():
+    train_df = pd.read_excel(TRAIN_FILE)
+    score_df_checking = pd.read_csv(SCORE_FILE_CHECKING)
+    score_df_credit = pd.read_csv(SCORE_FILE_CREDIT)
+
+    # Validate required columns
+    for col in [COL_MERCHANT, COL_DESCRIPTION, COL_AMOUNT, COL_CODE]:
+        if col not in train_df.columns:
+            raise ValueError(f"Training file missing required column: '{col}'")
+    # Score CSV schema validation (bank export)
+    required_score_cols = ["Date", "Description", "Withdrawal", "Deposit"]
+    missing = [c for c in required_score_cols if c not in score_df_checking.columns]
+    if missing:
+        raise ValueError(
+            f"Scoring file missing required column(s): {missing}. "
+            "Expected: Date, Description, Withdrawal, Deposit (plus optional other columns)."
+        )
+    required_credit_cols = ["Transaction Date", "Description", "Amount"]
+    missing_credit = [c for c in required_credit_cols if c not in score_df_credit.columns]
+    if missing_credit:
+        raise ValueError(
+            f"Credit scoring file missing required column(s): {missing_credit}. "
+            "Expected: Transaction Date, Description, Amount (plus optional other columns)."
+        )
+
+    # Guard: ensure there is at least 1 row to score
+    if len(score_df_checking) == 0:
+        raise ValueError(
+            f"'{SCORE_FILE_CHECKING}' contains 0 rows to score. "
+            "Make sure it has data rows under the header row."
+        )
+    if len(score_df_credit) == 0:
+        raise ValueError(
+            f"'{SCORE_FILE_CREDIT}' contains 0 rows to score. "
+            "Make sure it has data rows under the header row."
+        )
+
+    # Map bank-export CSV columns into internal schema
+    score_df_checking = normalize_score_checking_csv(score_df_checking)
+    score_df_credit = normalize_score_credit_csv(score_df_credit)
+
+    # Prep numeric + text for training
+    train_df = add_numeric_features(train_df)
+    train_df["Text"] = build_text_column(train_df)
+
+    # Only labeled rows in training
+    train_df = train_df[train_df[COL_CODE].notna()].copy()
+    train_df[COL_CODE] = train_df[COL_CODE].astype(str)
+
+    if len(train_df) == 0:
+        raise ValueError(f"No labeled rows found in '{TRAIN_FILE}'. Column '{COL_CODE}' must contain codes.")
+
+    # Embeddings-only workflow
+    booster, classes = train_or_load_embeddings(train_df)
+
+    out_checking = score_transactions(score_df_checking, booster, classes)
+    out_credit = score_transactions(score_df_credit, booster, classes)
+
+    out_checking.to_excel(OUTPUT_FILE_CHECKING, index=False)
+    print(f"Wrote → {OUTPUT_FILE_CHECKING}")
+
+    out_credit.to_excel(OUTPUT_FILE_CREDIT, index=False)
+    print(f"Wrote → {OUTPUT_FILE_CREDIT}")
+
     print(f"Auto threshold: {AUTO_ASSIGN_THRESHOLD} | Force retrain: {FORCE_RETRAIN}")
 
 if __name__ == "__main__":
