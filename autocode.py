@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 import xgboost as xgb
+import argparse
 
 # =========================
 # CONFIG
@@ -307,49 +308,70 @@ def score_transactions(score_df: pd.DataFrame, booster: xgb.Booster, classes: np
     out["NeedsReview"] = needs_review
     return out
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Auto-code transactions using embeddings + XGBoost.")
+    parser.add_argument(
+        "--account",
+        choices=["checking", "credit", "both"],
+        default="both",
+        help="Which account transactions to score. Default: both."
+    )
+    return parser.parse_args()
+
 # =========================
 # MAIN
 # =========================
 def main():
+    args = parse_args()
     train_df = pd.read_excel(TRAIN_FILE)
-    score_df_checking = pd.read_csv(SCORE_FILE_CHECKING)
-    score_df_credit = pd.read_csv(SCORE_FILE_CREDIT)
+
+    score_df_checking = None
+    score_df_credit = None
+
+    if args.account in ("checking", "both"):
+        score_df_checking = pd.read_csv(SCORE_FILE_CHECKING)
+    if args.account in ("credit", "both"):
+        score_df_credit = pd.read_csv(SCORE_FILE_CREDIT)
 
     # Validate required columns
     for col in [COL_MERCHANT, COL_DESCRIPTION, COL_AMOUNT, COL_CODE]:
         if col not in train_df.columns:
             raise ValueError(f"Training file missing required column: '{col}'")
     # Score CSV schema validation (bank export)
-    required_score_cols = ["Date", "Description", "Withdrawal", "Deposit"]
-    missing = [c for c in required_score_cols if c not in score_df_checking.columns]
-    if missing:
-        raise ValueError(
-            f"Scoring file missing required column(s): {missing}. "
-            "Expected: Date, Description, Withdrawal, Deposit (plus optional other columns)."
-        )
-    required_credit_cols = ["Transaction Date", "Description", "Amount"]
-    missing_credit = [c for c in required_credit_cols if c not in score_df_credit.columns]
-    if missing_credit:
-        raise ValueError(
-            f"Credit scoring file missing required column(s): {missing_credit}. "
-            "Expected: Transaction Date, Description, Amount (plus optional other columns)."
-        )
+    if score_df_checking is not None:
+        required_score_cols = ["Date", "Description", "Withdrawal", "Deposit"]
+        missing = [c for c in required_score_cols if c not in score_df_checking.columns]
+        if missing:
+            raise ValueError(
+                f"Scoring file missing required column(s): {missing}. "
+                "Expected: Date, Description, Withdrawal, Deposit (plus optional other columns)."
+            )
+    if score_df_credit is not None:
+        required_credit_cols = ["Transaction Date", "Description", "Amount"]
+        missing_credit = [c for c in required_credit_cols if c not in score_df_credit.columns]
+        if missing_credit:
+            raise ValueError(
+                f"Credit scoring file missing required column(s): {missing_credit}. "
+                "Expected: Transaction Date, Description, Amount (plus optional other columns)."
+            )
 
     # Guard: ensure there is at least 1 row to score
-    if len(score_df_checking) == 0:
+    if score_df_checking is not None and len(score_df_checking) == 0:
         raise ValueError(
             f"'{SCORE_FILE_CHECKING}' contains 0 rows to score. "
             "Make sure it has data rows under the header row."
         )
-    if len(score_df_credit) == 0:
+    if score_df_credit is not None and len(score_df_credit) == 0:
         raise ValueError(
             f"'{SCORE_FILE_CREDIT}' contains 0 rows to score. "
             "Make sure it has data rows under the header row."
         )
 
     # Map bank-export CSV columns into internal schema
-    score_df_checking = normalize_score_checking_csv(score_df_checking)
-    score_df_credit = normalize_score_credit_csv(score_df_credit)
+    if score_df_checking is not None:
+        score_df_checking = normalize_score_checking_csv(score_df_checking)
+    if score_df_credit is not None:
+        score_df_credit = normalize_score_credit_csv(score_df_credit)
 
     # Prep numeric + text for training
     train_df = add_numeric_features(train_df)
@@ -365,16 +387,17 @@ def main():
     # Embeddings-only workflow
     booster, classes = train_or_load_embeddings(train_df)
 
-    out_checking = score_transactions(score_df_checking, booster, classes)
-    out_credit = score_transactions(score_df_credit, booster, classes)
+    if score_df_checking is not None:
+        out_checking = score_transactions(score_df_checking, booster, classes)
+        out_checking.to_excel(OUTPUT_FILE_CHECKING, index=False)
+        print(f"Wrote → {OUTPUT_FILE_CHECKING}")
 
-    out_checking.to_excel(OUTPUT_FILE_CHECKING, index=False)
-    print(f"Wrote → {OUTPUT_FILE_CHECKING}")
+    if score_df_credit is not None:
+        out_credit = score_transactions(score_df_credit, booster, classes)
+        out_credit.to_excel(OUTPUT_FILE_CREDIT, index=False)
+        print(f"Wrote → {OUTPUT_FILE_CREDIT}")
 
-    out_credit.to_excel(OUTPUT_FILE_CREDIT, index=False)
-    print(f"Wrote → {OUTPUT_FILE_CREDIT}")
-
-    print(f"Auto threshold: {AUTO_ASSIGN_THRESHOLD} | Force retrain: {FORCE_RETRAIN}")
+    print(f"Scored: {args.account} | Auto threshold: {AUTO_ASSIGN_THRESHOLD} | Force retrain: {FORCE_RETRAIN}")
 
 if __name__ == "__main__":
     main()
