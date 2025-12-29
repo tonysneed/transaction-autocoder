@@ -1,0 +1,41 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Autocode: Checking",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/autocode.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--account",
+                "checking"
+            ]
+        },
+        {
+            "name": "Autocode: Credit",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/autocode.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--account",
+                "credit"
+            ]
+        },
+        {
+            "name": "Autocode: Both",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/autocode.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--account",
+                "both"
+            ]
+        }
+    ]
+}
