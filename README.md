@@ -4,16 +4,26 @@ This program trains a model on bank transaction data. It then uses this model to
 
 ## Input Files
 
-- **training.xlsx**: contains training data
-- **to_code_checking**.xlsx: contains checking transactions which are to be coded
-- **to_credit_checking**.xlsx: contains credit transactions which are to be coded
+- Training data:
+  - training/training.xlsx
+- Checking transactions:
+  - input/to_code_checking.csv
+- Credit transactions:
+  - input/to_code_credit.csv
+
+## Output Files
+
+- Checking transactions with codes:
+  - output/to_code_checking_scored.xlsx
+- Credit transactions with codes:
+  - output/to_code_credit_scored.xlsx
 
 ## Usage
 
-1. Put Excel files and the script in the same folder:
-   - training.xlsx
-   - to_code_checking.xlsx
-   - to_code_credit.xlsx
+1. Ensure files are in the expected locations:
+   - training/training.xlsx
+   - input/to_code_checking.csv
+   - input/to_code_credit.csv
    - autocode.py
 
 2. Run the program
@@ -21,14 +31,10 @@ This program trains a model on bank transaction data. It then uses this model to
     python autocode.py
     ```
 
-## Output File
+## Training model cleanup
+- Perform after updating training algorithm
 
-- **to_code_checking_scored.xlsx**: checking transactions with codes
-- **to_code_credit_scored.xlsx**: credit transactions with codes
-
-## Training model cleanup (after updating training algorithm)
-
-```bash
-rm -f models/model_embeddings.xgb models/model_embeddings_classes.json
-rm -f models/model_embeddings.ubj models/model_embeddings_classes.json
-```
+    ```bash
+    rm -f models/model_embeddings.xgb models/model_embeddings_classes.json
+    rm -f models/model_embeddings.ubj models/model_embeddings_classes.json
+    ```

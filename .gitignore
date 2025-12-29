@@ -223,7 +223,10 @@ __marimo__/
 ~*.*
 .DS_Store
 
-# Excel files
+# Data files
 backup/
+training/
+input/
+output/
 *.xlsx
 *.csv

@@ -11,11 +11,15 @@ import argparse
 # =========================
 # CONFIG
 # =========================
-TRAIN_FILE = "training.xlsx"
-SCORE_FILE_CHECKING = "to_code_checking.csv"
-SCORE_FILE_CREDIT = "to_code_credit.csv"
-OUTPUT_FILE_CHECKING = "to_code_checking_scored.xlsx"
-OUTPUT_FILE_CREDIT = "to_code_credit_scored.xlsx"
+TRAIN_DIR = "training"
+INPUT_DIR = "input"
+OUTPUT_DIR = "output"
+
+TRAIN_FILE = os.path.join(TRAIN_DIR, "training.xlsx")
+SCORE_FILE_CHECKING = os.path.join(INPUT_DIR, "to_code_checking.csv")
+SCORE_FILE_CREDIT = os.path.join(INPUT_DIR, "to_code_credit.csv")
+OUTPUT_FILE_CHECKING = os.path.join(OUTPUT_DIR, "to_code_checking_scored.xlsx")
+OUTPUT_FILE_CREDIT = os.path.join(OUTPUT_DIR, "to_code_credit_scored.xlsx")
 
 # Train persistence (models)
 FORCE_RETRAIN = False
@@ -42,6 +46,9 @@ EMBED_BATCH_SIZE = 256
 
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(EMBED_CACHE_DIR, exist_ok=True)
+os.makedirs(TRAIN_DIR, exist_ok=True)
+os.makedirs(INPUT_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # =========================
 # TEXT NORMALIZATION
